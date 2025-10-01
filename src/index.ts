@@ -43,8 +43,11 @@ import {
 import { aiTriage } from "./ai.js";
 import { setLogLevel, always, log } from "./logger.js";
 import { shouldSkipFeed, updateFeedStats, generateQualityReport } from "./feed-quality.js";
+import { startTimer, endTimer, printMetrics } from "./metrics.js";
 
 async function main(): Promise<void> {
+  startTimer("Total Runtime");
+
   const config = loadConfig();
   setLogLevel(config.logLevel);
 
@@ -52,12 +55,14 @@ async function main(): Promise<void> {
   const timeoutMs = config.globalTimeoutMinutes * 60 * 1000;
   setTimeout(() => {
     log(`⏱️  Global timeout reached (${config.globalTimeoutMinutes} minutes) - exiting`, "error");
+    printMetrics();
     process.exit(2); // Exit code 2 = timeout
   }, timeoutMs);
 
   log(`⏱️  Global timeout set: ${config.globalTimeoutMinutes} minutes`, "info");
 
   // Parse OPML to get feeds
+  startTimer("OPML Parsing");
   const allFeeds = await parseOpml(config.opmlPath);
   if (allFeeds.length === 0) {
     log("No feeds found in OPML", "error");
@@ -83,6 +88,7 @@ async function main(): Promise<void> {
   } else {
     always(`Feeds: ${feeds.length}`);
   }
+  endTimer("OPML Parsing");
 
   // Ensure all feeds have state entries
   for (const f of feeds) {
@@ -92,16 +98,17 @@ async function main(): Promise<void> {
   }
 
   // Fetch feed items in parallel with concurrency control
+  startTimer("Feed Fetching");
   const perFeedItems = await mapWithConcurrency(feeds, config.concurrency, (feed) =>
-    fetchFeedItems(feed, config.linkValidate, config.linkTimeoutMs)
+    fetchFeedItems(feed, config.linkValidate, config.linkTimeoutMs, config.maxArticleAgeDays)
   );
+  endTimer("Feed Fetching");
 
-  // Filter new items based on per-feed seen cache and age
+  // Filter new items based on per-feed seen cache (age filtering done in RSS fetch)
   const newItems: FeedItem[] = [];
   const feedItemsMap: { [feedUrl: string]: FeedItem[] } = {};
-  const maxAge = config.maxArticleAgeDays > 0
-    ? Date.now() - (config.maxArticleAgeDays * 24 * 60 * 60 * 1000)
-    : 0;
+
+  let skippedAlreadySeen = 0;
 
   for (let i = 0; i < feeds.length; i++) {
     const f = feeds[i];
@@ -111,18 +118,21 @@ async function main(): Promise<void> {
 
     for (const it of items) {
       // Skip if already seen
-      if (feedState.seen[it.guid]) continue;
-
-      // Skip if too old (if age limit is set)
-      if (maxAge > 0 && new Date(it.pubDate).getTime() < maxAge) {
-        feedState.seen[it.guid] = true; // Mark as seen so we don't check again
+      if (feedState.seen[it.guid]) {
+        skippedAlreadySeen++;
         continue;
       }
+
+      // Age filtering already done in RSS fetch, just skip duplicates here
 
       newItems.push(it);
       feedState.seen[it.guid] = true;
       feedItemsMap[f.url].push(it);
     }
+  }
+
+  if (skippedAlreadySeen > 0) {
+    always(`Filtered: ${skippedAlreadySeen} already seen (age filtering done during fetch)`);
   }
 
   // Sort newest first to create recent pages first
@@ -137,6 +147,7 @@ async function main(): Promise<void> {
   always(`New items: ${newItems.length}`);
 
   // AI triage before writing to Notion
+  startTimer("AI Triage");
   const triaged = await aiTriage(
     newItems,
     config.openaiApiKey,
@@ -148,6 +159,7 @@ async function main(): Promise<void> {
     config.aiSummary,
     config.aiSummaryMaxTokens
   );
+  endTimer("AI Triage");
 
   always(`New items after triage: ${triaged.length}`);
 
@@ -156,6 +168,7 @@ async function main(): Promise<void> {
 
   if (triaged.length) {
     always("\n📤 Creating pages in Notion...");
+    startTimer("Notion Page Creation");
     await createPagesInBatches(
       notion,
       triaged,
@@ -163,6 +176,7 @@ async function main(): Promise<void> {
       config.batchSize,
       config.requestDelayMs
     );
+    endTimer("Notion Page Creation");
     always("✅ All pages created");
 
     // Update feed quality stats based on AI decisions
@@ -179,17 +193,23 @@ async function main(): Promise<void> {
 
   // Prune old items and enforce caps
   log("Pruning old items...", "info");
+  startTimer("Pruning & Cleanup");
   await pruneNotion(notion, config.notionDbId, config.pruneMaxAgeDays);
   if (config.perFeedHardCap > 0) {
     log("Enforcing per-feed cap...", "info");
     await enforcePerFeedCap(notion, config.notionDbId, config.perFeedHardCap);
   }
+  endTimer("Pruning & Cleanup");
 
+  endTimer("Total Runtime");
   always("Done");
 }
 
 main()
   .then(async () => {
+    // Show performance metrics
+    printMetrics();
+
     // Show feed quality report after sync
     const state = await loadState(process.env.STATE_FILE || ".rss_seen.json");
     generateQualityReport(state);
@@ -199,6 +219,7 @@ main()
   })
   .catch((error) => {
     log(`❌ Fatal error: ${error}`, "error");
+    printMetrics();
     process.exit(1);
   });
 
