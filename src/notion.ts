@@ -8,11 +8,14 @@ export function createNotionClient(token: string): Client {
 }
 
 export function notionPageProps(item: FeedItem): any {
+  // Notion Select fields don't allow commas - replace with dashes
+  const cleanSource = item.source.replace(/,/g, " -").slice(0, 100);
+
   return {
     Title: { title: [{ text: { content: item.title.slice(0, 2000) } }] },
     URL: item.link ? { url: item.link } : undefined,
     Published: { date: { start: new Date(item.pubDate).toISOString() } },
-    Source: { select: { name: item.source.slice(0, 100) } },
+    Source: { select: { name: cleanSource } },
     Summary: item.summary
       ? { rich_text: [{ type: "text", text: { content: String(item.summary).slice(0, 2000) } }] }
       : { rich_text: [] },
