@@ -13,7 +13,10 @@
     "dev": "tsx src/index.ts",
     "test": "vitest",
     "test:unit": "vitest run --reporter=verbose",
+    "test:ci": "vitest run --reporter=verbose --coverage",
     "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "keywords": [
