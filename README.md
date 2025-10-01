@@ -6,8 +6,10 @@ Automatically sync RSS feeds to a Notion database with smart pruning and dedupli
 
 - 📰 Reads Feedly OPML files to discover RSS feeds
 - 🔄 Fetches new items across all feeds with concurrency control
+- 🤖 **AI-powered triage** with OpenAI to auto-classify articles (keep/deprioritize/ignore)
+- 🔗 **Link validation** to filter out dead links before import
 - 📝 Creates one Notion page per item in your database
-- 🏷️ Marks items as "Unread" by default (changeable to "Read" or "Archived")
+- 🏷️ Smart status assignment based on AI decisions
 - 🗑️ Automatically prunes old items based on age and status
 - 🔢 Enforces per-feed item caps
 - 💾 Maintains local cache to avoid duplicates
@@ -177,6 +179,14 @@ rss-to-notion/
 | Variable           | Default          | Description                                    |
 |--------------------|------------------|------------------------------------------------|
 | NOTION_TOKEN       | (required)       | Your Notion integration token                  |
+| NOTION_DB_ID       | -                | Notion database ID (or use --db flag)          |
+| OPENAI_API_KEY     | -                | OpenAI API key for AI triage (optional)        |
+| AI_TRIAGE          | true             | Enable AI-powered article classification       |
+| AI_MODEL           | gpt-4o-mini      | OpenAI model to use for triage                 |
+| AI_MAX_TOKENS      | 400              | Max tokens for AI response                     |
+| LINK_VALIDATE      | true             | Validate links before importing                |
+| LINK_TIMEOUT_MS    | 8000             | Link validation timeout (milliseconds)         |
+| MAX_ARTICLE_AGE_DAYS| 0               | Only import articles from last N days (0=all)  |
 | PRUNE_MAX_AGE_DAYS | 30               | Archive Read items older than this (days)      |
 | PER_FEED_HARD_CAP  | 500              | Max items per feed (archive older)             |
 | STATE_FILE         | .rss_seen.json   | Local cache file for seen items                |

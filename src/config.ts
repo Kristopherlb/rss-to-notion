@@ -37,6 +37,23 @@ export function loadConfig(): Config {
     stateFile: process.env.STATE_FILE || ".rss_seen.json",
     batchSize: parseInt(process.env.BATCH_SIZE || "20", 10),
     concurrency: parseInt(process.env.CONCURRENCY || "4", 10),
+    maxArticleAgeDays: parseInt(process.env.MAX_ARTICLE_AGE_DAYS || "0", 10),
+    maxArticles: parseInt(process.env.MAX_ARTICLES || "0", 10),
+    openaiApiKey: process.env.OPENAI_API_KEY || "",
+    aiTriage: (process.env.AI_TRIAGE || "true").toLowerCase() === "true",
+    aiModel: process.env.AI_MODEL || "gpt-4o-mini",
+    aiMaxTokens: parseInt(process.env.AI_MAX_TOKENS || "400", 10),
+    linkValidate: (process.env.LINK_VALIDATE || "true").toLowerCase() === "true",
+    linkTimeoutMs: parseInt(process.env.LINK_TIMEOUT_MS || "8000", 10),
+    requestDelayMs: parseInt(process.env.REQUEST_DELAY_MS || "1000", 10),
+    logLevel: (process.env.LOG_LEVEL || "normal") as "quiet" | "normal" | "verbose",
+    autoDisableThreshold: parseFloat(process.env.AUTO_DISABLE_THRESHOLD || "0.1"),
+    autoDisableMinSample: parseInt(process.env.AUTO_DISABLE_MIN_SAMPLE || "20", 10),
+    globalTimeoutMinutes: parseInt(process.env.GLOBAL_TIMEOUT_MINUTES || "10", 10),
+    aiBatchSize: parseInt(process.env.AI_BATCH_SIZE || "10", 10),
+    aiConcurrency: parseInt(process.env.AI_CONCURRENCY || "5", 10),
+    aiSummary: (process.env.AI_SUMMARY || "true").toLowerCase() === "true",
+    aiSummaryMaxTokens: parseInt(process.env.AI_SUMMARY_MAX_TOKENS || "180", 10),
   };
 }
 

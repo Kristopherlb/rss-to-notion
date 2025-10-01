@@ -33,26 +33,58 @@ import { loadConfig } from "./config.js";
 import { loadState, saveState } from "./state.js";
 import { parseOpml } from "./opml.js";
 import { fetchFeedItems, mapWithConcurrency } from "./rss.js";
+import type { FeedItem } from "./types.js";
 import {
   createNotionClient,
   createPagesInBatches,
   pruneNotion,
   enforcePerFeedCap,
 } from "./notion.js";
+import { aiTriage } from "./ai.js";
+import { setLogLevel, always, log } from "./logger.js";
+import { shouldSkipFeed, updateFeedStats, generateQualityReport } from "./feed-quality.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  setLogLevel(config.logLevel);
+
+  // Set global timeout to prevent hanging
+  const timeoutMs = config.globalTimeoutMinutes * 60 * 1000;
+  setTimeout(() => {
+    log(`⏱️  Global timeout reached (${config.globalTimeoutMinutes} minutes) - exiting`, "error");
+    process.exit(2); // Exit code 2 = timeout
+  }, timeoutMs);
+
+  log(`⏱️  Global timeout set: ${config.globalTimeoutMinutes} minutes`, "info");
 
   // Parse OPML to get feeds
-  const feeds = await parseOpml(config.opmlPath);
-  if (feeds.length === 0) {
-    console.error("No feeds found in OPML");
+  const allFeeds = await parseOpml(config.opmlPath);
+  if (allFeeds.length === 0) {
+    log("No feeds found in OPML", "error");
     process.exit(1);
   }
-  console.log(`Feeds: ${feeds.length}`);
 
-  // Load state and ensure all feeds have entries
+  // Filter out auto-disabled low-quality feeds
   const state = await loadState(config.stateFile);
+  const disabledFeeds: string[] = [];
+
+  const feeds = allFeeds.filter((f) => {
+    const shouldSkip = shouldSkipFeed(f, state, config.autoDisableThreshold, config.autoDisableMinSample);
+    if (shouldSkip) {
+      disabledFeeds.push(f.url);
+      const stats = state.feeds[f.url]?.stats;
+      log(`Skipping low-quality feed (${(stats!.quality * 100).toFixed(0)}%): ${f.url}`, "warn");
+    }
+    return !shouldSkip;
+  });
+
+  if (disabledFeeds.length > 0) {
+    always(`Feeds: ${feeds.length} (${disabledFeeds.length} auto-disabled due to low quality)`);
+  } else {
+    always(`Feeds: ${feeds.length}`);
+  }
+
+  // Ensure all feeds have state entries
   for (const f of feeds) {
     if (!state.feeds[f.url]) {
       state.feeds[f.url] = { seen: {} };
@@ -60,54 +92,113 @@ async function main(): Promise<void> {
   }
 
   // Fetch feed items in parallel with concurrency control
-  const perFeedItems = await mapWithConcurrency(
-    feeds,
-    config.concurrency,
-    fetchFeedItems
+  const perFeedItems = await mapWithConcurrency(feeds, config.concurrency, (feed) =>
+    fetchFeedItems(feed, config.linkValidate, config.linkTimeoutMs)
   );
 
-  // Filter new items based on per-feed seen cache
-  const newItems = [];
+  // Filter new items based on per-feed seen cache and age
+  const newItems: FeedItem[] = [];
+  const feedItemsMap: { [feedUrl: string]: FeedItem[] } = {};
+  const maxAge = config.maxArticleAgeDays > 0
+    ? Date.now() - (config.maxArticleAgeDays * 24 * 60 * 60 * 1000)
+    : 0;
+
   for (let i = 0; i < feeds.length; i++) {
     const f = feeds[i];
     const items = perFeedItems[i] || [];
     const feedState = state.feeds[f.url];
+    feedItemsMap[f.url] = [];
 
     for (const it of items) {
-      if (!feedState.seen[it.guid]) {
-        newItems.push(it);
-        feedState.seen[it.guid] = true;
+      // Skip if already seen
+      if (feedState.seen[it.guid]) continue;
+
+      // Skip if too old (if age limit is set)
+      if (maxAge > 0 && new Date(it.pubDate).getTime() < maxAge) {
+        feedState.seen[it.guid] = true; // Mark as seen so we don't check again
+        continue;
       }
+
+      newItems.push(it);
+      feedState.seen[it.guid] = true;
+      feedItemsMap[f.url].push(it);
     }
   }
 
   // Sort newest first to create recent pages first
   newItems.sort((a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime());
 
-  console.log(`New items: ${newItems.length}`);
+  // Limit number of articles for testing/debugging
+  if (config.maxArticles > 0 && newItems.length > config.maxArticles) {
+    always(`Limiting to ${config.maxArticles} articles (from ${newItems.length})`);
+    newItems.splice(config.maxArticles);
+  }
+
+  always(`New items: ${newItems.length}`);
+
+  // AI triage before writing to Notion
+  const triaged = await aiTriage(
+    newItems,
+    config.openaiApiKey,
+    config.aiModel,
+    config.aiMaxTokens,
+    config.aiTriage,
+    config.aiBatchSize,
+    config.aiConcurrency,
+    config.aiSummary,
+    config.aiSummaryMaxTokens
+  );
+
+  always(`New items after triage: ${triaged.length}`);
 
   // Create Notion client and process items
   const notion = createNotionClient(config.notionToken);
 
-  if (newItems.length) {
-    await createPagesInBatches(notion, newItems, config.notionDbId, config.batchSize);
+  if (triaged.length) {
+    always("\n📤 Creating pages in Notion...");
+    await createPagesInBatches(
+      notion,
+      triaged,
+      config.notionDbId,
+      config.batchSize,
+      config.requestDelayMs
+    );
+    always("✅ All pages created");
+
+    // Update feed quality stats based on AI decisions
+    for (const [feedUrl, items] of Object.entries(feedItemsMap)) {
+      if (items.length > 0) {
+        updateFeedStats(state, feedUrl, items);
+      }
+    }
+
     await saveState(state, config.stateFile);
   } else {
-    // Still save in case feeds were added
     await saveState(state, config.stateFile);
   }
 
   // Prune old items and enforce caps
+  log("Pruning old items...", "info");
   await pruneNotion(notion, config.notionDbId, config.pruneMaxAgeDays);
   if (config.perFeedHardCap > 0) {
+    log("Enforcing per-feed cap...", "info");
     await enforcePerFeedCap(notion, config.notionDbId, config.perFeedHardCap);
   }
 
-  console.log("Done");
+  always("Done");
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    // Show feed quality report after sync
+    const state = await loadState(process.env.STATE_FILE || ".rss_seen.json");
+    generateQualityReport(state);
+
+    always("\n✅ Sync completed successfully");
+    process.exit(0);
+  })
+  .catch((error) => {
+    log(`❌ Fatal error: ${error}`, "error");
+    process.exit(1);
+  });
 
