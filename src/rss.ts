@@ -9,27 +9,70 @@ const rss = new RSSParser({ timeout: 20000 });
 export async function fetchFeedItems(
   feed: Feed,
   linkValidate = false,
-  linkTimeoutMs = 8000
+  linkTimeoutMs = 8000,
+  maxAgeDays = 0
 ): Promise<FeedItem[]> {
   try {
     const parsed = await rss.parseURL(feed.url);
     const items = parsed.items || [];
 
     // Normalize items to our standard format
-    const normalized = items.map((it) => ({
-      guid: it.guid || it.id || it.link || `${feed.url}#${it.title ?? "no-title"}`,
-      title: it.title || "(no title)",
-      link: it.link || it.enclosure?.url || "",
-      pubDate: it.isoDate || it.pubDate || new Date().toISOString(),
-      summary: it.contentSnippet || it.content || "",
-      source: feed.title || parsed.title || new URL(feed.url).hostname,
-    }));
+    let filteredByUrl = 0;
+    const normalized = items.map((it) => {
+      const link = it.link || it.enclosure?.url || "";
 
-    if (!linkValidate) return normalized;
+      // Check if URL contains old year (2023 or earlier) - filter immediately
+      const urlYear = link.match(/\/(201[0-9]|202[0-3])\//)?.[1];
+      if (urlYear) {
+        const year = parseInt(urlYear);
+        const currentYear = new Date().getFullYear();
+        if (year < currentYear - 1) {
+          // Skip old republished content
+          filteredByUrl++;
+          return null;
+        }
+      }
 
-    // Validate links
+      return {
+        guid: it.guid || it.id || link || `${feed.url}#${it.title ?? "no-title"}`,
+        title: it.title || "(no title)",
+        link,
+        pubDate: it.isoDate || it.pubDate || new Date().toISOString(),
+        summary: it.contentSnippet || it.content || "",
+        source: feed.title || parsed.title || new URL(feed.url).hostname,
+      };
+    }).filter(Boolean) as FeedItem[];
+
+    if (filteredByUrl > 0) {
+      log(`${feed.title}: Filtered ${filteredByUrl} old articles by URL year`, "info");
+    }
+
+    // Filter by age BEFORE link validation to save time/resources
+    let filteredByAge = 0;
+    const maxAge = maxAgeDays > 0 
+      ? Date.now() - (maxAgeDays * 24 * 60 * 60 * 1000)
+      : 0;
+    
+    const recentItems = maxAge > 0
+      ? normalized.filter((it) => {
+          const pubDateMs = new Date(it.pubDate).getTime();
+          if (pubDateMs < maxAge) {
+            filteredByAge++;
+            return false;
+          }
+          return true;
+        })
+      : normalized;
+    
+    if (filteredByAge > 0) {
+      log(`${feed.title}: Filtered ${filteredByAge} articles older than ${maxAgeDays} days`, "info");
+    }
+
+    if (!linkValidate) return recentItems;
+
+    // Validate links (only for recent items)
     const checked: FeedItem[] = [];
-    for (const it of normalized) {
+    for (const it of recentItems) {
       if (!it.link) {
         checked.push(it);
         continue;

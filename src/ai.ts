@@ -4,6 +4,7 @@ import type { FeedItem } from "./types.js";
 import fs from "fs/promises";
 import path from "path";
 import url from "url";
+import { recordAICost } from "./metrics.js";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
@@ -82,6 +83,15 @@ Example: [{"decision":"keep","priority":"High","topics":["DevOps","Kubernetes"],
 
     const json: any = await resp.json();
     const text = json.choices?.[0]?.message?.content?.trim() || "{}";
+
+    // Track token usage and cost
+    if (json.usage) {
+      recordAICost(
+        json.usage.prompt_tokens || 0,
+        json.usage.completion_tokens || 0,
+        model
+      );
+    }
 
     let parsed: any;
     try {
